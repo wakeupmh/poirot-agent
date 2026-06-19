@@ -1,31 +1,33 @@
 version: 0.2
 
-# Headless Poirot: pi (Kimi) investigates a log-error spike / production incident
-# on shared CodeBuild compute, under a read-only IAM role, and writes a report.
+# Headless Poirot: Claude Code investigates a log-error spike / production
+# incident on shared CodeBuild compute, under a read-only IAM role, and writes a
+# report. Claude Code authenticates with a Claude subscription token, so usage is
+# billed against the plan rather than per API token.
 
 env:
   shell: bash
   secrets-manager:
-    # The Kimi (Moonshot) API key. Populate this secret after `cdk deploy`.
-    KIMI_API_KEY: poirot-agent/kimi-key
+    # Claude subscription OAuth token from `claude setup-token`. Populate after deploy.
+    CLAUDE_CODE_OAUTH_TOKEN: poirot-agent/claude-token
 
 phases:
   install:
     runtime-versions:
       nodejs: 22
     commands:
-      - npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+      - npm install -g @anthropic-ai/claude-code
       - npm ci
       - npm run build
       # Log tool versions for debugging.
-      - pi --version || true
+      - claude --version
       - aws --version
 
   pre_build:
     commands:
       - ': "${TRIGGER:?TRIGGER is required (pass via --environment-variables-override)}"'
-      # Read-only investigator profile. pi's AWS CLI calls assume this role on
-      # demand; the build role itself only has assume + sns:publish + logs.
+      # Read-only investigator profile. Claude Code's AWS CLI calls assume this
+      # role on demand; the build role itself only has assume + sns:publish + logs.
       - |
         mkdir -p ~/.aws
         cat > ~/.aws/config <<EOF
@@ -33,41 +35,6 @@ phases:
         role_arn = ${INVESTIGATOR_ROLE_ARN}
         credential_source = EcsContainer
         region = ${AWS_REGION}
-        EOF
-      # Point pi at Kimi (Moonshot, OpenAI-compatible). KIMI_API_KEY is left as a
-      # literal so pi resolves it from the environment at run time.
-      - |
-        mkdir -p ~/.pi/agent
-        cat > ~/.pi/agent/models.json <<EOF
-        {
-          "providers": {
-            "moonshot": {
-              "baseUrl": "${KIMI_BASE_URL:-https://api.moonshot.ai/v1}",
-              "api": "openai-completions",
-              "apiKey": "\$KIMI_API_KEY",
-              "models": [
-                {
-                  "id": "${KIMI_MODEL:-kimi-latest}",
-                  "name": "Kimi 2.7",
-                  "reasoning": true,
-                  "input": ["text"],
-                  "contextWindow": 262144,
-                  "maxTokens": 32768
-                }
-              ]
-            }
-          }
-        }
-        EOF
-      - |
-        cat > ~/.pi/agent/settings.json <<EOF
-        {
-          "defaultProvider": "moonshot",
-          "defaultModel": "${KIMI_MODEL:-kimi-latest}",
-          "defaultThinkingLevel": "medium",
-          "defaultProjectTrust": "always",
-          "quietStartup": true
-        }
         EOF
 
   build:

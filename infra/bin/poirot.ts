@@ -10,12 +10,11 @@ new PoirotStack(app, "PoirotStack", {
     region: process.env.CDK_DEFAULT_REGION,
   },
   description:
-    "Headless pi (Kimi) on CodeBuild that investigates log-error spikes and production incidents.",
+    "Headless Claude Code on CodeBuild that investigates log-error spikes and production incidents.",
   // These come from cdk.json context; override with `-c repoOwner=... -c repoName=...`.
   repoOwner: app.node.tryGetContext("repoOwner"),
   repoName: app.node.tryGetContext("repoName"),
-  kimiBaseUrl: app.node.tryGetContext("kimiBaseUrl"),
-  kimiModel: app.node.tryGetContext("kimiModel"),
+  claudeModel: app.node.tryGetContext("claudeModel"),
   // Optional: a log group to wire an example error-spike alarm to.
   targetLogGroupName: app.node.tryGetContext("targetLogGroupName"),
 });

@@ -8,8 +8,6 @@
     "@aws-cdk/core:checkSecretUsage": true,
     "@aws-cdk/aws-iam:minimizePolicies": true,
     "repoOwner": "wakeupmh",
-    "repoName": "poirot-agent",
-    "kimiBaseUrl": "https://api.moonshot.ai/v1",
-    "kimiModel": "kimi-latest"
+    "repoName": "poirot-agent"
   }
 }

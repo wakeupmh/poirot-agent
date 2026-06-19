@@ -19,10 +19,8 @@ export interface PoirotStackProps extends cdk.StackProps {
   repoOwner: string;
   /** GitHub repo name. */
   repoName: string;
-  /** Kimi (Moonshot) OpenAI-compatible base URL. */
-  kimiBaseUrl: string;
-  /** Kimi model id to send to the API (set this to your exact Kimi 2.7 id). */
-  kimiModel: string;
+  /** Optional Claude model override for Claude Code (omit to use the account default). */
+  claudeModel?: string;
   /** Optional: existing log group to attach an example error-spike alarm to. */
   targetLogGroupName?: string;
 }
@@ -33,10 +31,12 @@ export class PoirotStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: PoirotStackProps) {
     super(scope, id, props);
 
-    // --- Secret: the Kimi API key (populate after deploy) -------------------
-    const kimiKey = new secrets.Secret(this, "KimiKey", {
-      secretName: "poirot-agent/kimi-key",
-      description: "Kimi (Moonshot) API key used by pi. Populate after deploy.",
+    // --- Secret: the Claude subscription token (populate after deploy) ------
+    // Generate it with `claude setup-token` (Pro/Max account); usage is then
+    // billed against the subscription rather than per API token.
+    const claudeToken = new secrets.Secret(this, "ClaudeToken", {
+      secretName: "poirot-agent/claude-token",
+      description: "Claude Code OAuth token from `claude setup-token`. Populate after deploy.",
     });
 
     // --- SNS: reports out, alarms in ---------------------------------------
@@ -57,10 +57,10 @@ export class PoirotStack extends cdk.Stack {
       description: "Poirot CodeBuild role: assume read-only role + publish reports.",
     });
 
-    // 2) Investigator role: what pi actually uses — strictly read-only.
+    // 2) Investigator role: what Claude Code actually uses — strictly read-only.
     const investigatorRole = new iam.Role(this, "InvestigatorRole", {
       assumedBy: new iam.ArnPrincipal(buildRole.roleArn),
-      description: "Read-only role pi assumes to investigate. Cannot mutate anything.",
+      description: "Read-only role Claude Code assumes to investigate. Cannot mutate anything.",
       managedPolicies: [
         iam.ManagedPolicy.fromAwsManagedPolicyName("ReadOnlyAccess"),
       ],
@@ -74,7 +74,7 @@ export class PoirotStack extends cdk.Stack {
       }),
     );
     reportsTopic.grantPublish(buildRole);
-    kimiKey.grantRead(buildRole);
+    claudeToken.grantRead(buildRole);
     buildRole.addToPolicy(
       new iam.PolicyStatement({
         actions: ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
@@ -101,8 +101,7 @@ export class PoirotStack extends cdk.Stack {
       environmentVariables: {
         INVESTIGATOR_ROLE_ARN: { value: investigatorRole.roleArn },
         REPORT_SNS_TOPIC_ARN: { value: reportsTopic.topicArn },
-        KIMI_BASE_URL: { value: props.kimiBaseUrl },
-        KIMI_MODEL: { value: props.kimiModel },
+        ...(props.claudeModel ? { CLAUDE_MODEL: { value: props.claudeModel } } : {}),
       },
     });
 
@@ -165,7 +164,7 @@ export class PoirotStack extends cdk.Stack {
       value: reportsTopic.topicArn,
       description: "Subscribe (email/Slack/etc.) to receive Poirot's reports.",
     });
-    new cdk.CfnOutput(this, "KimiSecretName", { value: kimiKey.secretName });
+    new cdk.CfnOutput(this, "ClaudeSecretName", { value: claudeToken.secretName });
     new cdk.CfnOutput(this, "InvestigatorRoleArn", { value: investigatorRole.roleArn });
   }
 }

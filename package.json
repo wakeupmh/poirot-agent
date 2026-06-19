@@ -1,7 +1,7 @@
 {
   "name": "poirot-agent",
   "version": "0.1.0",
-  "description": "Headless pi (Kimi) on AWS that investigates log error spikes and production incidents, then writes a root-cause report.",
+  "description": "Headless Claude Code on AWS that investigates log error spikes and production incidents, then writes a root-cause report.",
   "license": "MIT",
   "type": "commonjs",
   "bin": {

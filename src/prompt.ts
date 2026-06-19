@@ -33,14 +33,13 @@ export function contextFromEnv(env: NodeJS.ProcessEnv = process.env): Investigat
   };
 }
 
-/**
- * Build the full prompt handed to pi: the Poirot system instructions followed
- * by the concrete case facts. We inline the system prompt rather than rely on a
- * provider-specific flag so the behaviour is identical across pi modes.
- */
-export function buildPrompt(ctx: InvestigationContext, repoRoot: string): string {
-  const systemPrompt = readFileSync(join(repoRoot, "system-prompt.md"), "utf8").trim();
+/** Poirot's persona, method, and rules — passed to Claude Code as the system prompt. */
+export function readSystemPrompt(repoRoot: string): string {
+  return readFileSync(join(repoRoot, "system-prompt.md"), "utf8").trim();
+}
 
+/** Build the case facts handed to Claude Code as the print-mode prompt. */
+export function buildUserPrompt(ctx: InvestigationContext): string {
   const logGroupsLine =
     ctx.logGroups.length > 0
       ? ctx.logGroups.map((g) => `  - ${g}`).join("\n")
@@ -66,5 +65,5 @@ export function buildPrompt(ctx: InvestigationContext, repoRoot: string): string
     "Investigate using the AWS CLI (read-only). Begin now and finish with your report.",
   );
 
-  return `${systemPrompt}\n\n${facts.join("\n")}\n`;
+  return `${facts.join("\n")}\n`;
 }
