@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs";
 import { dirname, join, parse } from "node:path";
 import { PublishCommand, SNSClient } from "@aws-sdk/client-sns";
-import { contextFromEnv, buildPrompt } from "./prompt";
-import { runPi } from "./pi";
+import { contextFromEnv, buildUserPrompt, readSystemPrompt } from "./prompt";
+import { runClaude } from "./claude";
 
 /**
  * Find the repo root by walking up from this file until we see the marker file,
@@ -35,23 +35,29 @@ async function notify(topicArn: string, ctx: { trigger: string }, report: string
 
 async function main(): Promise<void> {
   const ctx = contextFromEnv();
-  // Investigator (read-only) profile pi uses for its AWS CLI calls. The runner
-  // itself keeps the default build-role credentials for SNS publish.
-  const awsProfile = process.env.PI_AWS_PROFILE?.trim() || "investigator";
+  // Investigator (read-only) profile Claude Code uses for its AWS CLI calls.
+  // The runner itself keeps the default build-role credentials for SNS publish.
+  const awsProfile = process.env.INVESTIGATOR_PROFILE?.trim() || "investigator";
+  const maxTurns = Number(process.env.CLAUDE_MAX_TURNS) || 40;
+  const model = process.env.CLAUDE_MODEL?.trim() || undefined;
 
   console.log(`===== Poirot is on the case: ${ctx.trigger} =====`);
-  const prompt = buildPrompt(ctx, REPO_ROOT);
+  const systemPrompt = readSystemPrompt(REPO_ROOT);
+  const userPrompt = buildUserPrompt(ctx);
 
-  const { report, exitCode } = await runPi({
-    prompt,
+  const { report, exitCode, isError } = await runClaude({
+    userPrompt,
+    systemPrompt,
     cwd: REPO_ROOT,
     awsProfile,
+    maxTurns,
+    model,
   });
 
   if (!report) {
     console.error(
-      "❌ pi produced no final report. Check the raw event stream above; " +
-        `pi exited with code ${exitCode}.`,
+      "❌ Claude Code produced no final report. Check the raw event stream above; " +
+        `it exited with code ${exitCode}.`,
     );
     process.exitCode = exitCode || 1;
     return;
@@ -71,7 +77,7 @@ async function main(): Promise<void> {
     }
   }
 
-  process.exitCode = exitCode;
+  process.exitCode = isError ? 1 : exitCode;
 }
 
 main().catch((err) => {
