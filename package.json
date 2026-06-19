@@ -1,0 +1,32 @@
+{
+  "name": "poirot-agent",
+  "version": "0.1.0",
+  "description": "Headless pi (Kimi) on AWS that investigates log error spikes and production incidents, then writes a root-cause report.",
+  "license": "MIT",
+  "type": "commonjs",
+  "bin": {
+    "poirot": "dist/src/investigate.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "investigate": "ts-node src/investigate.ts",
+    "cdk": "cdk",
+    "deploy": "cdk deploy",
+    "synth": "cdk synth",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@aws-sdk/client-sns": "^3.700.0"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-codebuild": "^3.700.0",
+    "@types/aws-lambda": "^8.10.145",
+    "@types/node": "^22.10.0",
+    "aws-cdk": "^2.170.0",
+    "aws-cdk-lib": "^2.170.0",
+    "constructs": "^10.4.0",
+    "esbuild": "^0.24.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.0"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "app": "npx ts-node --prefer-ts-exts infra/bin/poirot.ts",
+  "watch": {
+    "include": ["infra/**", "buildspec.yml", "system-prompt.md"],
+    "exclude": ["node_modules", "dist", "cdk.out"]
+  },
+  "context": {
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/aws-iam:minimizePolicies": true,
+    "repoOwner": "wakeupmh",
+    "repoName": "poirot-agent",
+    "kimiBaseUrl": "https://api.moonshot.ai/v1",
+    "kimiModel": "kimi-latest"
+  }
+}
