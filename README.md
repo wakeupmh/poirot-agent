@@ -100,6 +100,31 @@ npm run deploy -- -c claudeModel=sonnet
 npm run deploy -- -c targetLogGroupName=/aws/lambda/my-service
 ```
 
+## Token lifecycle
+
+`claude setup-token` is the **long-lived, headless** credential path — the same
+mechanism Anthropic's own `claude-code-action` uses. The token it mints is tied
+to your Pro/Max plan and lasts on the order of months (up to ~a year), so day to
+day there's nothing to manage. It is **not** the short-lived interactive session
+token.
+
+It is not literally permanent, though. When it eventually expires, investigations
+will fail to authenticate (you'll see an auth error in the CodeBuild log). To
+rotate, just mint a fresh one and overwrite the secret — no redeploy needed:
+
+```bash
+claude setup-token
+aws secretsmanager put-secret-value \
+  --secret-id poirot-agent/claude-token --secret-string "$CLAUDE_CODE_OAUTH_TOKEN"
+```
+
+> A zero-touch variant is possible — persist Claude Code's auto-refreshed OAuth
+> credentials back to Secrets Manager after each build so the token rolls forward
+> indefinitely. It requires `secretsmanager:PutSecretValue` on the build role and
+> serializing builds (`concurrentBuildLimit: 1`) to avoid refresh-token races, so
+> it's intentionally left out here in favour of the simpler rotate-when-it-expires
+> approach.
+
 ## Run an investigation manually
 
 ```bash
