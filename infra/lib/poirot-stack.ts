@@ -179,8 +179,37 @@ export class PoirotStack extends cdk.Stack {
       alarm.addAlarmAction(new cw_actions.SnsAction(alarmTopic));
     }
 
+    // --- GitHub Actions OIDC: deploy role for CI/CD --------------------------
+    const githubProvider = new iam.OpenIdConnectProvider(this, "GitHubOidc", {
+      url: "https://token.actions.githubusercontent.com",
+      clientIds: ["sts.amazonaws.com"],
+    });
+
+    const deployRole = new iam.Role(this, "GitHubDeployRole", {
+      roleName: "poirot-github-deploy",
+      description: "Assumed by GitHub Actions (OIDC) to run `cdk deploy` for this stack.",
+      assumedBy: new iam.WebIdentityPrincipal(githubProvider.openIdConnectProviderArn, {
+        StringEquals: {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+        },
+        StringLike: {
+          "token.actions.githubusercontent.com:sub": `repo:${props.repoOwner}/${props.repoName}:ref:refs/heads/main`,
+        },
+      }),
+      maxSessionDuration: cdk.Duration.hours(1),
+    });
+    // CDK deploys via its own bootstrap roles (file-publishing, deploy, lookup) —
+    // the GitHub role only needs to assume those, not broad account permissions.
+    deployRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["sts:AssumeRole"],
+        resources: [`arn:${this.partition}:iam::${this.account}:role/cdk-*-${this.account}-${this.region}`],
+      }),
+    );
+
     // --- Outputs ------------------------------------------------------------
     new cdk.CfnOutput(this, "ProjectName", { value: project.projectName });
+    new cdk.CfnOutput(this, "GitHubDeployRoleArn", { value: deployRole.roleArn });
     new cdk.CfnOutput(this, "AlarmTopicArn", {
       value: alarmTopic.topicArn,
       description: "Point your CloudWatch alarm actions here to dispatch Poirot.",
