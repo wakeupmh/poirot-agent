@@ -20,9 +20,24 @@ function findRepoRoot(): string {
 
 const REPO_ROOT = findRepoRoot();
 
+/**
+ * Make a string safe for an SNS Subject: ASCII printable only, no control
+ * chars/newlines, non-empty, and at most 100 characters — SNS rejects anything
+ * else, which would turn a successful investigation into a publish failure.
+ */
+export function sanitizeSubject(trigger: string): string {
+  const cleaned = `Poirot: ${trigger}`
+    // Drop control chars and non-ASCII; collapse whitespace runs to single spaces.
+    .replace(/[^\x20-\x7E]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const subject = (cleaned || "Poirot: incident").slice(0, 100).trim();
+  return subject;
+}
+
 async function notify(topicArn: string, ctx: { trigger: string }, report: string): Promise<void> {
   const sns = new SNSClient({});
-  const subject = `Poirot: ${ctx.trigger}`.slice(0, 100);
+  const subject = sanitizeSubject(ctx.trigger);
   await sns.send(
     new PublishCommand({
       TopicArn: topicArn,
@@ -80,7 +95,10 @@ async function main(): Promise<void> {
   process.exitCode = isError ? 1 : exitCode;
 }
 
-main().catch((err) => {
-  console.error(`❌ Investigation failed: ${(err as Error).stack ?? err}`);
-  process.exitCode = 1;
-});
+// Only run when invoked directly (so importing this module for tests is safe).
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(`❌ Investigation failed: ${(err as Error).stack ?? err}`);
+    process.exitCode = 1;
+  });
+}
