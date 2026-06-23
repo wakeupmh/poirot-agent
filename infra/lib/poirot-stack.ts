@@ -57,7 +57,12 @@ export class PoirotStack extends cdk.Stack {
       description: "Poirot CodeBuild role: assume read-only role + publish reports.",
     });
 
-    // 2) Investigator role: what Claude Code actually uses — strictly read-only.
+    // 2) Investigator role: what Claude Code actually uses. Broad read access
+    //    (ReadOnlyAccess) so it can investigate anything, but with an explicit
+    //    DENY on the high-value data reads. Poirot ingests untrusted log content
+    //    — a prompt-injection surface — and then publishes a report, so we make
+    //    sure it physically cannot read secrets/keys/object data and exfiltrate
+    //    them. An explicit Deny always wins over the managed Allow.
     const investigatorRole = new iam.Role(this, "InvestigatorRole", {
       assumedBy: new iam.ArnPrincipal(buildRole.roleArn),
       description: "Read-only role Claude Code assumes to investigate. Cannot mutate anything.",
@@ -66,6 +71,26 @@ export class PoirotStack extends cdk.Stack {
       ],
       maxSessionDuration: cdk.Duration.hours(1),
     });
+    investigatorRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "DenySensitiveDataReads",
+        effect: iam.Effect.DENY,
+        actions: [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:BatchGetSecretValue",
+          "ssm:GetParameter",
+          "ssm:GetParameters",
+          "ssm:GetParametersByPath",
+          "kms:Decrypt",
+          "s3:GetObject",
+          "dynamodb:GetItem",
+          "dynamodb:BatchGetItem",
+          "dynamodb:Query",
+          "dynamodb:Scan",
+        ],
+        resources: ["*"],
+      }),
+    );
 
     buildRole.addToPolicy(
       new iam.PolicyStatement({

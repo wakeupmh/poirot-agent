@@ -13,6 +13,7 @@
     "cdk": "cdk",
     "deploy": "cdk deploy",
     "synth": "cdk synth",
+    "test": "node --require ts-node/register --test test/unit.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

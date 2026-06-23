@@ -29,7 +29,7 @@ export interface ClaudeRunResult {
 }
 
 /** Pull human-readable text out of an assistant event's message, defensively. */
-function extractAssistantText(event: Record<string, unknown>): string | undefined {
+export function extractAssistantText(event: Record<string, unknown>): string | undefined {
   const message = event.message as Record<string, unknown> | undefined;
   const content = message?.content;
   if (!Array.isArray(content)) return undefined;
@@ -46,11 +46,41 @@ function extractAssistantText(event: Record<string, unknown>): string | undefine
 }
 
 /**
+ * Reduce Claude Code's stream-json events into a final report. Prefers the
+ * terminal `result` event's text; falls back to the last assistant message.
+ * Pure and exported so it can be unit-tested without spawning a process.
+ */
+export function extractReportFromEvents(events: Record<string, unknown>[]): {
+  report: string;
+  isError: boolean;
+} {
+  let resultText = "";
+  let lastAssistantText = "";
+  let isError = false;
+
+  for (const event of events) {
+    const type = typeof event.type === "string" ? event.type : "";
+    if (type === "assistant") {
+      const text = extractAssistantText(event);
+      if (text && text.trim()) lastAssistantText = text.trim();
+    } else if (type === "result") {
+      if (typeof event.result === "string") resultText = event.result.trim();
+      if (event.is_error === true) isError = true;
+    }
+  }
+
+  return { report: resultText || lastAssistantText, isError };
+}
+
+/**
  * Run Claude Code headless (`claude -p ... --output-format stream-json`) and
  * return the agent's final report. Auth comes from CLAUDE_CODE_OAUTH_TOKEN in
- * the environment, so usage is billed against the Claude subscription. Each
- * stdout line is a JSON event; we tee raw lines to the build log and prefer the
- * terminal `result` event, falling back to the last assistant message.
+ * the environment, so usage is billed against the Claude subscription.
+ *
+ * Note: we deliberately do NOT pass --dangerously-skip-permissions. In print
+ * mode, tools named in --allowedTools run without prompting, and anything else
+ * is denied — so allowing just Bash is enough, and we avoid Claude Code's guard
+ * that refuses skip-permissions when running as root (as CodeBuild does).
  */
 export function runClaude(opts: ClaudeRunOptions): Promise<ClaudeRunResult> {
   return new Promise((resolve, reject) => {
@@ -60,7 +90,6 @@ export function runClaude(opts: ClaudeRunOptions): Promise<ClaudeRunResult> {
       "--output-format",
       "stream-json",
       "--verbose",
-      "--dangerously-skip-permissions",
       "--allowedTools",
       "Bash",
       "--max-turns",
@@ -77,30 +106,17 @@ export function runClaude(opts: ClaudeRunOptions): Promise<ClaudeRunResult> {
     });
 
     let buffer = "";
-    let resultText = "";
-    let lastAssistantText = "";
-    let isError = false;
+    const events: Record<string, unknown>[] = [];
 
     const handleLine = (line: string) => {
       const trimmed = line.trim();
       if (!trimmed) return;
       // Tee the raw event to the build log for full traceability.
       console.log(trimmed);
-
-      let event: Record<string, unknown>;
       try {
-        event = JSON.parse(trimmed);
+        events.push(JSON.parse(trimmed) as Record<string, unknown>);
       } catch {
-        return; // non-JSON noise; already logged above
-      }
-
-      const type = typeof event.type === "string" ? event.type : "";
-      if (type === "assistant") {
-        const text = extractAssistantText(event);
-        if (text && text.trim()) lastAssistantText = text.trim();
-      } else if (type === "result") {
-        if (typeof event.result === "string") resultText = event.result.trim();
-        if (event.is_error === true) isError = true;
+        // non-JSON noise; already logged above
       }
     };
 
@@ -117,11 +133,8 @@ export function runClaude(opts: ClaudeRunOptions): Promise<ClaudeRunResult> {
 
     child.on("close", (code) => {
       if (buffer.trim()) handleLine(buffer);
-      resolve({
-        report: resultText || lastAssistantText,
-        exitCode: code ?? 0,
-        isError,
-      });
+      const { report, isError } = extractReportFromEvents(events);
+      resolve({ report, exitCode: code ?? 0, isError });
     });
   });
 }

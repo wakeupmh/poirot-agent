@@ -30,7 +30,7 @@ function dimension(alarm: CloudWatchAlarm, ...names: string[]): string | undefin
   return undefined;
 }
 
-function overrides(message: string): EnvironmentVariable[] {
+export function buildOverrides(message: string): EnvironmentVariable[] {
   let alarm: CloudWatchAlarm = {};
   try {
     alarm = JSON.parse(message) as CloudWatchAlarm;
@@ -58,7 +58,7 @@ export const handler = async (event: SNSEvent): Promise<void> => {
 
   for (const record of event.Records) {
     const message = record.Sns.Message;
-    const environmentVariablesOverride = overrides(message);
+    const environmentVariablesOverride = buildOverrides(message);
     const trigger = environmentVariablesOverride.find((e) => e.name === "TRIGGER")?.value;
     console.log(`Dispatching Poirot for: ${trigger}`);
 

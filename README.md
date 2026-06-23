@@ -57,7 +57,15 @@ asking the model nicely.
 build role        →  can ONLY: assume the investigator role, publish a report,
                       read the Claude token            (least privilege)
 investigator role →  ReadOnlyAccess — what Claude's AWS CLI calls actually run as
+                      ...minus an explicit DENY on secrets, SSM params, KMS
+                      decrypt, S3 object reads, and DynamoDB data
 ```
+
+Read-only isn't enough on its own: Poirot reads **untrusted log content** (a
+prompt-injection surface) and then publishes a report, so a crafted log line
+must not be able to talk it into reading a secret and leaking it. An explicit
+**deny** on the high-value data reads closes that door — it can investigate
+*infrastructure* (logs, metrics, deploys, config) but cannot read your *data*.
 
 This is the crux of trusting an autonomous agent in production: **you don't trust
 the agent, you trust the blast-radius wall around it.**
