@@ -88,6 +88,10 @@ export class PoirotStack extends cdk.Stack {
           "dynamodb:BatchGetItem",
           "dynamodb:Query",
           "dynamodb:Scan",
+          // These can expose secrets stored in env vars / inline templates
+          "lambda:GetFunction",
+          "ecs:DescribeTaskDefinition",
+          "cloudformation:GetTemplate",
         ],
         resources: ["*"],
       }),
