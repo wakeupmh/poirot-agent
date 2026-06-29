@@ -8,6 +8,7 @@
     "@aws-cdk/core:checkSecretUsage": true,
     "@aws-cdk/aws-iam:minimizePolicies": true,
     "repoOwner": "wakeupmh",
-    "repoName": "poirot-agent"
+    "repoName": "poirot-agent",
+    "claudeModel": "claude-sonnet-4-6"
   }
 }

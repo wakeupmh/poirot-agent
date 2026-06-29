@@ -1,6 +1,8 @@
 import {
   CodeBuildClient,
   StartBuildCommand,
+  ListBuildsForProjectCommand,
+  BatchGetBuildsCommand,
   type EnvironmentVariable,
 } from "@aws-sdk/client-codebuild";
 import type { SNSEvent } from "aws-lambda";
@@ -39,8 +41,10 @@ export function buildOverrides(message: string): EnvironmentVariable[] {
   }
 
   const trigger = alarm.AlarmName ?? "Manual incident";
-  const logGroup = dimension(alarm, "LogGroup", "LogGroupName");
   const service = dimension(alarm, "ServiceName", "Service", "FunctionName");
+  const functionName = dimension(alarm, "FunctionName");
+  const logGroup = dimension(alarm, "LogGroup", "LogGroupName")
+    ?? (functionName ? `/aws/lambda/${functionName}` : undefined);
 
   const env: EnvironmentVariable[] = [{ name: "TRIGGER", value: trigger }];
   if (logGroup) env.push({ name: "LOG_GROUPS", value: logGroup });
@@ -52,6 +56,8 @@ export function buildOverrides(message: string): EnvironmentVariable[] {
   return env;
 }
 
+const DEDUP_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+
 export const handler = async (event: SNSEvent): Promise<void> => {
   const projectName = process.env.PROJECT_NAME;
   if (!projectName) throw new Error("PROJECT_NAME env var is required");
@@ -60,8 +66,41 @@ export const handler = async (event: SNSEvent): Promise<void> => {
     const message = record.Sns.Message;
     const environmentVariablesOverride = buildOverrides(message);
     const trigger = environmentVariablesOverride.find((e) => e.name === "TRIGGER")?.value;
-    console.log(`Dispatching Poirot for: ${trigger}`);
+    const service = environmentVariablesOverride.find((e) => e.name === "SERVICE")?.value;
 
+    // Dedup: skip if a build for the same SERVICE started within the last 10 minutes.
+    let isDuplicate = false;
+    if (service) {
+      try {
+        const listRes = await codebuild.send(
+          new ListBuildsForProjectCommand({ projectName, sortOrder: "DESCENDING" }),
+        );
+        const recentIds = listRes.ids ?? [];
+        if (recentIds.length > 0) {
+          const batchRes = await codebuild.send(
+            new BatchGetBuildsCommand({ ids: recentIds.slice(0, 10) }),
+          );
+          const now = Date.now();
+          for (const build of batchRes.builds ?? []) {
+            const startedAt = build.startTime?.getTime() ?? 0;
+            if (now - startedAt < DEDUP_WINDOW_MS) {
+              const envVars = build.environment?.environmentVariables ?? [];
+              const buildService = envVars.find((e) => e.name === "SERVICE")?.value;
+              if (buildService === service) {
+                console.log(`Suppressing duplicate Poirot dispatch for SERVICE=${service}`);
+                isDuplicate = true;
+                break;
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.warn(`Dedup check failed (proceeding with build): ${err}`);
+      }
+    }
+    if (isDuplicate) continue;
+
+    console.log(`Dispatching Poirot for: ${trigger}`);
     const res = await codebuild.send(
       new StartBuildCommand({ projectName, environmentVariablesOverride }),
     );

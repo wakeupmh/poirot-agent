@@ -11,6 +11,7 @@ import {
   aws_secretsmanager as secrets,
   aws_sns as sns,
   aws_sns_subscriptions as subs,
+  aws_ssm as ssm,
 } from "aws-cdk-lib";
 import { Construct } from "constructs";
 
@@ -87,6 +88,10 @@ export class PoirotStack extends cdk.Stack {
           "dynamodb:BatchGetItem",
           "dynamodb:Query",
           "dynamodb:Scan",
+          // These can expose secrets stored in env vars / inline templates
+          "lambda:GetFunction",
+          "ecs:DescribeTaskDefinition",
+          "cloudformation:GetTemplate",
         ],
         resources: ["*"],
       }),
@@ -142,11 +147,18 @@ export class PoirotStack extends cdk.Stack {
     });
     trigger.addToRolePolicy(
       new iam.PolicyStatement({
-        actions: ["codebuild:StartBuild"],
+        actions: ["codebuild:StartBuild", "codebuild:ListBuildsForProject", "codebuild:BatchGetBuilds"],
         resources: [project.projectArn],
       }),
     );
     alarmTopic.addSubscription(new subs.LambdaSubscription(trigger));
+
+    // Export AlarmTopic ARN as SSM param so other stacks can reference it without coupling.
+    new ssm.StringParameter(this, "AlarmTopicParam", {
+      parameterName: "/poirot/alarm-topic-arn",
+      stringValue: alarmTopic.topicArn,
+      description: "Poirot AlarmTopic ARN — point CloudWatch alarm actions here.",
+    });
 
     // --- Optional example: wire an error-spike alarm to the alarm topic -----
     if (props.targetLogGroupName) {

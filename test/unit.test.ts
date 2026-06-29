@@ -23,6 +23,20 @@ test("buildOverrides: maps a CloudWatch alarm payload to env overrides", () => {
   assert.ok(env.RAW_PAYLOAD.includes("checkout-5xx"));
 });
 
+test("buildOverrides: derives LOG_GROUPS from FunctionName when no LogGroup dimension", () => {
+  const alarm = JSON.stringify({
+    AlarmName: "payment-webhook-errors",
+    Trigger: {
+      Dimensions: [
+        { name: "FunctionName", value: "joblee-payment-dev-pagarmeWebhook" },
+      ],
+    },
+  });
+  const env = Object.fromEntries(buildOverrides(alarm).map((e) => [e.name, e.value]));
+  assert.equal(env.SERVICE, "joblee-payment-dev-pagarmeWebhook");
+  assert.equal(env.LOG_GROUPS, "/aws/lambda/joblee-payment-dev-pagarmeWebhook");
+});
+
 test("buildOverrides: falls back to a manual trigger for non-JSON messages", () => {
   const env = Object.fromEntries(buildOverrides("just some text").map((e) => [e.name, e.value]));
   assert.equal(env.TRIGGER, "Manual incident");
