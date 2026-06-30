@@ -11,6 +11,7 @@ import {
   aws_secretsmanager as secrets,
   aws_sns as sns,
   aws_sns_subscriptions as subs,
+  aws_sqs as sqs,
   aws_ssm as ssm,
 } from "aws-cdk-lib";
 import { Construct } from "constructs";
@@ -143,15 +144,83 @@ export class PoirotStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(30),
       environment: {
         PROJECT_NAME: project.projectName,
+        // ReportsTopic ARN so the trigger can publish the "investigating" ack
+        // and the duplicate/circuit-open suppression notices (operators see
+        // Poirot's state instead of silence).
+        REPORT_SNS_TOPIC_ARN: reportsTopic.topicArn,
       },
     });
     trigger.addToRolePolicy(
       new iam.PolicyStatement({
-        actions: ["codebuild:StartBuild", "codebuild:ListBuildsForProject", "codebuild:BatchGetBuilds"],
+        // StartBuild and ListBuildsForProject operate on the *project* ARN.
+        actions: ["codebuild:StartBuild", "codebuild:ListBuildsForProject"],
         resources: [project.projectArn],
       }),
     );
-    alarmTopic.addSubscription(new subs.LambdaSubscription(trigger));
+    // BatchGetBuilds operates on *build* ARNs, not the project ARN — scoping it
+    // to projectArn gives AccessDenied, which the old code swallowed, silently
+    // disabling dedup. Scope it to the build ARN wildcard for this project.
+    trigger.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["codebuild:BatchGetBuilds"],
+        resources: [
+          `arn:${this.partition}:codebuild:${this.region}:${this.account}:build/${project.projectName}:*`,
+        ],
+      }),
+    );
+    // Trigger publishes ack / suppression notices to ReportsTopic.
+    reportsTopic.grantPublish(trigger);
+
+    // --- DLQ on the alarm SNS subscription ---------------------------------
+    // If StartBuild throws (concurrent-build limit, transient AWS error) the
+    // SNS message would otherwise be dropped silently — Poirot just doesn't
+    // run and nobody knows. Route undeliverable messages to an SQS DLQ and
+    // alarm on its depth so operators can replay or investigate.
+    const triggerDlq = new sqs.Queue(this, "TriggerDLQ", {
+      queueName: "poirot-trigger-dlq",
+      retentionPeriod: cdk.Duration.days(14),
+    });
+    alarmTopic.addSubscription(
+      new subs.LambdaSubscription(trigger, { deadLetterQueue: triggerDlq }),
+    );
+
+    // --- Self-monitoring: alarms that *watch Poirot itself* ---------------
+    // All publish to ReportsTopic (not AlarmTopic) so they notify operators
+    // without feedback-looping back into Poirot and burning subscription turns.
+    const notifyOps = (name: string, metric: cloudwatch.IMetric, description: string) =>
+      new cloudwatch.Alarm(this, name, {
+        alarmName: `poirot-${name}`,
+        metric,
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        alarmDescription: description,
+      }).addAlarmAction(new cw_actions.SnsAction(reportsTopic));
+
+    notifyOps(
+      "TriggerLambdaErrors",
+      trigger.metricErrors({ period: cdk.Duration.minutes(5), statistic: "Sum" }),
+      "Poirot's trigger Lambda is itself erroring — alarms may not be dispatching investigations.",
+    );
+    notifyOps(
+      "TriggerLambdaThrottles",
+      trigger.metricThrottles({ period: cdk.Duration.minutes(5), statistic: "Sum" }),
+      "Poirot's trigger Lambda is being throttled — alarms may not be dispatching investigations.",
+    );
+    notifyOps(
+      "TriggerDLQDepth",
+      triggerDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(5),
+        statistic: "Sum",
+      }),
+      "Poirot trigger SNS subscription is dropping alarm messages to the DLQ — investigations are being missed.",
+    );
+    notifyOps(
+      "InvestigatorFailedBuilds",
+      project.metricFailedBuilds({ period: cdk.Duration.minutes(5), statistic: "Sum" }),
+      "Poirot investigations themselves are failing in CodeBuild — reports are not being produced.",
+    );
 
     // Export AlarmTopic ARN as SSM param so other stacks can reference it without coupling.
     new ssm.StringParameter(this, "AlarmTopicParam", {
