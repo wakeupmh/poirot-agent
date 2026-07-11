@@ -217,6 +217,13 @@ from the stack outputs. The trigger Lambda does the rest.
 Stack-level vars (`INVESTIGATOR_ROLE_ARN`, `REPORT_SNS_TOPIC_ARN`) are set by CDK;
 the Claude token arrives from Secrets Manager as `CLAUDE_CODE_OAUTH_TOKEN`.
 
+### Live demo kit
+Showing this at a conference? [`demo/`](demo/) has a script that pumps a
+realistic error burst into a scratch log group so the whole pipeline — alarm
+fires, Poirot investigates, report lands — happens live on stage, plus a
+canned fallback report for when wifi doesn't cooperate mid-talk. See
+[`demo/README.md`](demo/README.md).
+
 ---
 
 ## Token lifecycle
