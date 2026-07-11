@@ -21,24 +21,30 @@ runner that drives Claude Code).
    CloudWatch alarm  (error-spike metric filter)
           │  alarm action
           ▼
-        SNS · AlarmTopic
+        SNS · AlarmTopic ──(undeliverable)──▶  SQS · TriggerDLQ ──▶ depth alarm ──▶ 📧
           │
           ▼
-    Trigger Lambda ──StartBuild──▶  CodeBuild · "poirot-investigator"
-                                          │
-                                          │  installs Claude Code, runs the TS runner
-                                          ▼
-                                 claude -p  (headless, stream-json)
-                                          │  Bash → AWS CLI
-                                          ▼  ── under the READ-ONLY investigator role ──
-                          CloudWatch Logs Insights · metrics · deploy history
-                                          │
-                                          ▼
-                              Root-cause report ──▶ build log + SNS · ReportsTopic ──▶ 📧
+    Trigger Lambda  ── dedup + circuit breaker against recent builds ──
+          │  StartBuild (unless suppressed — an ack/suppression notice
+          │   goes to ReportsTopic either way)
+          ▼
+      CodeBuild · "poirot-investigator"
+          │
+          │  installs Claude Code, runs the TS runner
+          ▼
+ claude -p  (headless, stream-json)
+          │  Bash → AWS CLI
+          ▼  ── under the READ-ONLY investigator role ──
+CloudWatch Logs Insights · metrics · deploy history
+          │
+          ▼
+Root-cause report ──▶ build log + SNS · ReportsTopic ──▶ 📧
 ```
 
 **No human in the loop until the report lands.** An alarm becomes an
-investigation; an investigation becomes a report.
+investigation; an investigation becomes a report — and if it doesn't, the
+DLQ, the circuit breaker, and Poirot's own self-monitoring alarms all report
+back to the same `ReportsTopic` so that failure isn't silent either.
 
 ---
 
@@ -121,7 +127,7 @@ high — the deploy timestamp, the new error signature, and the connection ceili
 
 | Stage | What happens |
 |-------|--------------|
-| **Trigger** | A CloudWatch alarm (e.g. an error-spike metric filter) fires its action to the `AlarmTopic`. A small Lambda turns the alarm into a `StartBuild`, lifting `LOG_GROUPS`/`SERVICE` from the alarm's metric dimensions when present. |
+| **Trigger** | A CloudWatch alarm (e.g. an error-spike metric filter) fires its action to the `AlarmTopic`. The trigger Lambda parses it, checks the last ~30 builds for a duplicate or a chronically firing service, and either suppresses the dispatch (with a notice to `ReportsTopic`) or calls `StartBuild` with `LOG_GROUPS`/`SERVICE`/`WINDOW_START`/`WINDOW_END` derived from the alarm. |
 | **Runtime** | CodeBuild installs Claude Code and runs the TS runner, which builds the prompt, spawns `claude -p --output-format stream-json`, and parses the event stream for Poirot's final report. |
 | **Tools** | Claude Code's **Bash** tool running the **AWS CLI** — no MCP server, no custom SDK tools. Logs Insights, metrics, and deploy history are all just CLI calls. |
 | **Output** | The report is printed to the build log and published to the `ReportsTopic` (subscribe email, Slack, PagerDuty, …). |
@@ -132,6 +138,34 @@ error lines, correlate with recent deploys/changes, size the blast radius, then
 form and *try to disprove* a hypothesis before committing. Every claim is tied to
 a log line, metric, or deploy event it actually retrieved. The full method and
 hard rules live in [`system-prompt.md`](system-prompt.md).
+
+### Resilience: dedup, circuit breaker, and self-monitoring
+A single incident can trip several alarms, and a flapping alarm can re-fire the
+same one repeatedly — the trigger Lambda absorbs both without a database, by
+querying CodeBuild's own recent build history:
+
+- **Dedup.** Keyed on `(SERVICE, METRIC_NAME)` — pulled from the alarm's
+  dimensions and `Trigger.MetricName` — with a 10-minute window. Two distinct
+  metrics on the same service (`Errors` vs `Throttles`) are *not* treated as
+  duplicates of each other, since they're usually separate investigations.
+- **Circuit breaker.** If a service has already been investigated 3+ times in
+  the last hour, further dispatches for it are suppressed — a chronically
+  firing alarm stops burning Claude subscription turns on repeat diagnoses of
+  the same root cause.
+- **Investigator gets tighter windows.** `WINDOW_START`/`WINDOW_END` are
+  derived from the alarm's own `Trigger.Period × EvaluationPeriods` when
+  present (a 2-of-3 × 5-min alarm → a 15-minute window) instead of a flat 1
+  hour, and `LOG_GROUPS` falls back to `/aws/lambda/<FunctionName>` when the
+  alarm has no explicit log-group dimension.
+- **Nothing fails silently.** Every dispatch, suppression, and circuit-open
+  decision publishes a short notice to `ReportsTopic`, so operators see
+  Poirot's state instead of guessing whether an alarm fired at all. A DLQ on
+  the `AlarmTopic` subscription catches anything `StartBuild` itself can't
+  swallow (e.g. a concurrent-build limit), with a depth alarm watching it. And
+  a handful of self-monitoring CloudWatch alarms — trigger Lambda errors/
+  throttles, DLQ depth, investigator build failures — publish to
+  `ReportsTopic` too, so a broken watcher doesn't go unnoticed without
+  feedback-looping back into Poirot itself.
 
 ---
 
@@ -144,8 +178,12 @@ hard rules live in [`system-prompt.md`](system-prompt.md).
 | `src/claude.ts` | Spawns `claude -p`, parses the stream-json events into a report |
 | `src/investigate.ts` | Entrypoint: run the investigation, print + publish the report |
 | `buildspec.yml` | CodeBuild: install Claude Code, run the TS runner |
-| `infra/lib/poirot-stack.ts` | CDK: CodeBuild, dual IAM roles, SNS topics, trigger Lambda, example alarm |
-| `infra/lambda/trigger.ts` | SNS alarm → `StartBuild` with per-incident env overrides |
+| `infra/lib/poirot-stack.ts` | CDK: CodeBuild, dual IAM roles, SNS topics, DLQ, self-monitoring alarms, trigger Lambda, GitHub OIDC deploy role, example alarm |
+| `infra/lambda/trigger.ts` | SNS alarm → `decideDispatch()` (dedup + circuit breaker) → `StartBuild` with per-incident env overrides |
+| `test/unit.test.ts` | Dependency-free `node:test` unit tests (`npm test`) |
+| `.github/workflows/ci.yml` | On every PR: typecheck, test, `cdk synth` |
+| `.github/workflows/deploy.yml` | On push to `main`: typecheck, test, then `cdk deploy` via OIDC (no long-lived AWS keys in GitHub) |
+| `demo/` | Live-demo kit — see [Live demo kit](#live-demo-kit) below |
 
 ---
 
@@ -164,6 +202,15 @@ npm install
 npm run deploy            # cdk deploy PoirotStack
 ```
 
+This first deploy has to run locally — it's what creates the GitHub OIDC
+provider and deploy role in the first place, so GitHub Actions has nothing to
+assume before it exists. Once it's up, hand deploys off to CI: grab
+`GitHubDeployRoleArn` from the stack outputs, set it as the repo secret
+`AWS_DEPLOY_ROLE_ARN` (and optionally the repo variable `AWS_REGION`), and
+every push to `main` that passes `.github/workflows/ci.yml`'s checks
+auto-deploys via `.github/workflows/deploy.yml` — OIDC, so no long-lived AWS
+keys live in GitHub. PRs only run the CI checks; they never deploy.
+
 After deploy, mint a subscription token, store it, and subscribe to reports:
 
 ```bash
@@ -178,10 +225,13 @@ aws sns subscribe --protocol email \
   --notification-endpoint you@example.com
 ```
 
-Optional — pin a model, or wire the example error-spike alarm to one of your log groups:
+`cdk.json` pins `claudeModel` to a specific Sonnet snapshot by default (cheaper
+and more predictable per investigation than floating to whatever "default"
+means at deploy time); override it, or wire the example error-spike alarm to
+one of your log groups:
 
 ```bash
-npm run deploy -- -c claudeModel=sonnet
+npm run deploy -- -c claudeModel=claude-sonnet-4-6
 npm run deploy -- -c targetLogGroupName=/aws/lambda/my-service
 ```
 
@@ -207,15 +257,18 @@ from the stack outputs. The trigger Lambda does the rest.
 | Var | Required | Meaning |
 |-----|----------|---------|
 | `TRIGGER` | ✅ | Alarm name / incident title |
-| `LOG_GROUPS` | | Comma-separated candidate log groups |
-| `SERVICE` | | Service/app name to narrow the search |
-| `WINDOW_START` / `WINDOW_END` | | ISO-8601 window (defaults to the last hour) |
+| `LOG_GROUPS` | | Comma-separated candidate log groups. When the trigger Lambda builds this from an alarm, it falls back to `/aws/lambda/<FunctionName>` if the alarm has no explicit log-group dimension. |
+| `SERVICE` | | Service/app name to narrow the search — also the dedup/circuit-breaker key |
+| `METRIC_NAME` | | The alarm's metric (e.g. `Errors`, `Throttles`) — the other half of the dedup key alongside `SERVICE` |
+| `WINDOW_START` / `WINDOW_END` | | ISO-8601 window. When dispatched from an alarm, derived from `Trigger.Period × EvaluationPeriods`; otherwise defaults to the last hour. |
 | `RAW_PAYLOAD` | | Raw alarm/incident JSON, passed through for context |
-| `CLAUDE_MODEL` | | Model override (else the account default) |
+| `CLAUDE_MODEL` | | Model override (else `cdk.json`'s pinned default) |
 | `CLAUDE_MAX_TURNS` | | Cap on agent turns (default 40) |
 
 Stack-level vars (`INVESTIGATOR_ROLE_ARN`, `REPORT_SNS_TOPIC_ARN`) are set by CDK;
-the Claude token arrives from Secrets Manager as `CLAUDE_CODE_OAUTH_TOKEN`.
+the Claude token arrives from Secrets Manager as `CLAUDE_CODE_OAUTH_TOKEN`. The
+`AlarmTopic` ARN is also exported to SSM as `/poirot/alarm-topic-arn`, so other
+stacks can point their alarms at it without a CDK cross-stack dependency.
 
 ### Live demo kit
 Showing this at a conference? [`demo/`](demo/) has a script that pumps a
@@ -272,7 +325,34 @@ Node toolchain. CodeBuild gives that with no idle cost and natural concurrency.
 
 **What stops it running forever / racking up cost?**
 `CLAUDE_MAX_TURNS` (default 40) bounds the agent, and CodeBuild's own timeout
-bounds the build.
+bounds the build. The circuit breaker bounds it further at the alarm level —
+no more than 3 investigations per service per hour, regardless of how often
+the alarm fires.
+
+**Why key dedup on `(SERVICE, METRIC_NAME)` instead of just the alarm name?**
+The same alarm firing twice is an obvious duplicate, but so is `Errors` and
+`Throttles` both firing for `checkout-api` within minutes of each other — same
+service, likely same root cause, and investigating both burns two turns'
+worth of subscription budget for one answer. Keying on the pair catches that
+without collapsing genuinely distinct alarms (`Errors` on `checkout-api` and
+`Errors` on `payments-api`) into one.
+
+**Why query CodeBuild's own build history for dedup instead of a database?**
+One fewer stateful resource to provision, secure, and pay for. CodeBuild
+already remembers what ran, when, and with what environment variables — that's
+exactly the state dedup needs, and it's already there.
+
+**Why a DLQ and self-monitoring alarms — isn't read-only + dedup enough?**
+Those handle the agent behaving unexpectedly; the DLQ and self-monitoring
+alarms handle the *harness* behaving unexpectedly — a throttled Lambda, a
+`StartBuild` that throws, a chronically failing build. Without them, "the
+alarm fired but nothing happened" is silent. Both failure classes need
+watching for an unattended system to be trustworthy.
+
+**Why OIDC for the GitHub Actions deploy role instead of AWS access keys?**
+No long-lived credentials sitting in GitHub secrets waiting to leak. The role
+trusts only `token.actions.githubusercontent.com` for this repo's `main`
+branch, and a session lasts at most an hour.
 
 ---
 
@@ -281,6 +361,8 @@ bounds the build.
 ```bash
 npm install
 npm run typecheck
+npm test
+npx cdk synth --quiet   # sanity-checks the stack without deploying
 # Drive one investigation locally — needs Claude Code on PATH, an authed Claude
 # session (or CLAUDE_CODE_OAUTH_TOKEN), and AWS credentials:
 TRIGGER="local test" LOG_GROUPS="/aws/lambda/foo" npm run investigate
